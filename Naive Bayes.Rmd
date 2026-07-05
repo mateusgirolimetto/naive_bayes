@@ -1,0 +1,265 @@
+---
+title: "Naive Bayes"
+author: "Mateus Girolimetto"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#-------------------------------------------------
+# 1. Carregando Dados
+#-------------------------------------------------
+```{r Caricando Dati}
+library(readr)
+diabetes_dataset <- read_csv("/home/usuario/Desktop/Monografia/Versão 2/diabetes_dataset.csv")
+
+
+# Conversione delle variabili in fattori
+diabetes_dataset$gender <- factor(diabetes_dataset$gender, levels = c("Male", "Female", "Other"))
+
+diabetes_dataset$ethnicity <- factor(diabetes_dataset$ethnicity, levels = c("White", "Hispanic", "Black", "Asian", "Other"))
+
+diabetes_dataset$education_level <- factor(diabetes_dataset$education_level, levels = c("No formal", "Highschool", "Graduate", "Postgraduate"))
+
+diabetes_dataset$income_level <- factor(diabetes_dataset$income_level, levels = c("Low", "Lower-Middle", "Middle", "Upper-Middle", "High"))
+
+diabetes_dataset$employment_status <- factor(diabetes_dataset$employment_status, levels = c("Employed", "Unemployed", "Retired", "Student"))
+
+diabetes_dataset$smoking_status <- factor(diabetes_dataset$smoking_status, levels = c("Never", "Former", "Current"))
+
+diabetes_dataset$family_history_diabetes <- factor(diabetes_dataset$family_history_diabetes, levels = c(0, 1), labels = c("No", "Yes"))
+
+diabetes_dataset$hypertension_history <- factor(diabetes_dataset$hypertension_history, levels = c(0, 1), labels = c("No", "Yes"))
+
+diabetes_dataset$cardiovascular_history <- factor(diabetes_dataset$cardiovascular_history, levels = c(0, 1), labels = c("No", "Yes"))
+
+diabetes_dataset$diabetes_stage <- factor(diabetes_dataset$diabetes_stage, levels = c("No Diabetes", "Pre-Diabetes", "Type 1", "Type 2", "Gestational"))
+
+diabetes_dataset$diagnosed_diabetes <- factor(diabetes_dataset$diagnosed_diabetes, levels = c(0, 1), labels = c("No", "Yes"))
+
+```
+
+#-------------------------------------------------
+# 2. Split treino / teste  e padronização
+#-------------------------------------------------
+
+```{r divisione dell insieme dei dati - parte 1}
+library(caret)
+set.seed(123)
+
+# Prima divisione: traning (95%) e test (5%)
+train_index <- createDataPartition(diabetes_dataset$diagnosed_diabetes, p = 0.95, list = FALSE)
+train <- diabetes_dataset[train_index, ]
+test  <- diabetes_dataset[-train_index, ]
+```
+
+```{r standardizzando insieme train/validation/test}
+
+# Separando le variabili numeriche
+library(dplyr)
+numeriche_train <- train %>% select(where(is.numeric))
+categoriali_train <- train %>% select(where(is.factor))
+
+numeriche_test <- test %>% select(where(is.numeric))
+categoriali_test <- test %>% select(where(is.factor))
+
+# Padronizando Treino
+numeriche_train_scaled <- scale(numeriche_train)
+
+# Guardar os parâmetros do treino (médias e desvios)
+numeriche_train_means <- attr(numeriche_train_scaled, "scaled:center")
+numeriche_train_sds   <- attr(numeriche_train_scaled, "scaled:scale")
+
+# Conjunto Treino Padronizado
+numeriche_train_scaled <- as.data.frame(numeriche_train_scaled)
+
+#numeriche_train_scaled$alcohol_consumption_per_week <- train$alcohol_consumption_per_week
+
+train_scaled <- cbind(numeriche_train_scaled, categoriali_train)
+
+# Aplicando em teste
+
+numeriche_test_scaled <- scale(numeriche_test,
+                        center = numeriche_train_means,
+                        scale  = numeriche_train_sds)
+numeriche_test_scaled <- as.data.frame(numeriche_test_scaled)
+
+#numeriche_test_scaled$alcohol_consumption_per_week <- test$alcohol_consumption_per_week
+
+test_scaled <- cbind(numeriche_test_scaled, categoriali_test)
+
+```
+
+```{r divisione dell insieme dei dati - parte 2}
+library(caret)
+set.seed(123)
+
+# Seconda divisione in "train": validation (89% de 95% = 85%) e valid (10%)
+train_index_2 <- createDataPartition(train_scaled$diagnosed_diabetes, p = 85/95, list = FALSE)
+train_scaled_2 <- train_scaled[train_index_2, ]
+valid_scaled <- train_scaled[-train_index_2, ]
+```
+
+#-------------------------------------------------
+# 3. Seleção de hiperparâmetros
+#-------------------------------------------------
+
+```{r Grid Hiperparâmetros: Laplace e Kernel}
+
+laplace <- c(0,1)
+kernel_values <- c(TRUE, FALSE)
+
+resultados <- data.frame()
+
+library(naivebayes)
+
+vars_to_drop <- c("diabetes_stage", "diabetes_risk_score")
+
+
+for(i in kernel_values){
+  for(j in laplace){
+    # Treinar Modelo
+    model_temp <- naive_bayes(
+                diagnosed_diabetes ~ ., 
+                data = train_scaled_2 |> dplyr::select(-all_of(vars_to_drop)),
+                laplace = j,
+                usekernel = i
+                )
+    
+    #Probabilidades
+        # Probabilidades
+    prob_temp <- predict(
+      model_temp,
+      newdata = valid_scaled |> dplyr::select(-all_of(vars_to_drop)),
+      type = "prob"
+    )
+    
+    prob_yes <- prob_temp[, "Yes"]
+    
+    # AUC
+    library(pROC)
+    auc_temp <- roc(
+      response = valid_scaled$diagnosed_diabetes,
+      predictor = prob_yes
+    )$auc
+    
+    # Guardar resultados
+    resultados <- rbind(resultados, data.frame(
+      Laplace = j,
+      Kernel = i,
+      AUC = as.numeric(auc_temp)
+    ))
+    
+
+  }}
+
+print(resultados)
+```
+
+```{r Limiar}
+set.seed(123)
+model_lim <- naive_bayes(
+  diagnosed_diabetes ~ .,
+  data = train_scaled_2 |> dplyr::select(-all_of(vars_to_drop)),
+  laplace = 1,
+  usekernel = TRUE
+)
+
+
+pred <- predict(model_lim, newdata = valid_scaled |> dplyr::select(-all_of(vars_to_drop)), type = "prob")
+
+prob_yes <-pred[,"Yes"]
+
+# AUC
+library(pROC)
+# Criar curva ROC
+roc_val_nv <- roc(valid_scaled$diagnosed_diabetes, prob_yes)
+
+# TODOS OS LIMIARES
+
+todos_limiares <- pROC::coords(
+  roc_val_nv,
+  x = "all",
+  ret = c("threshold", "sensitivity", "specificity")
+)
+todos_limiares
+
+# ESCOLHER LIMIAR (sensibilidade ~ 0.90)
+candidatos <- todos_limiares[
+  todos_limiares$sensitivity >= 0.90,
+]
+melhor_ponto <- candidatos[which.max(candidatos$threshold), ]
+
+print(melhor_ponto)
+
+threshold_nb <- melhor_ponto$threshold
+threshold_nb
+```
+
+#-------------------------------------------------
+# 4. Modelo Final
+#-------------------------------------------------
+
+```{r Modelo Final}
+model_final <- naive_bayes(
+  diagnosed_diabetes ~ .,
+  data = train_scaled |> dplyr::select(-all_of(vars_to_drop)),
+  laplace = 1,
+  usekernel = TRUE
+)
+```
+
+#-------------------------------------------------
+# 5. Avaliação no teste
+#-------------------------------------------------
+
+```{r Avaliação Final}
+pred_final <- predict(
+  model_final,
+  newdata = test_scaled |> dplyr::select(-all_of(vars_to_drop)),
+  type = "prob"
+)
+
+# Extrai apenas a probabilidade da classe positiva (Yes)
+prob_yes_final <- pred_final[, "Yes"]
+
+class_final <-  factor(ifelse(prob_yes_final >= threshold_nb, "Yes", "No"),
+                       levels = c("No","Yes"))
+
+library(caret)
+confusionMatrix(
+  data = class_final,
+  reference = test_scaled$diagnosed_diabetes,
+  positive = "Yes"
+)
+```
+
+```{r AUC-ROC}
+library(pROC)
+library(ggplot2)
+
+# ROC
+roc_test <- roc(test_scaled$diagnosed_diabetes,
+                prob_yes_final,
+                levels = c("No", "Yes"),
+                direction = "<")
+
+# AUC
+auc(roc_test)
+
+# Plot base (opcional, como você fez)
+plot(roc_test)
+
+# ggplot estilo simples
+g <- ggroc(roc_test) +
+  ggtitle("Curva ROC - Naive Bayes (Teste)") +
+  annotate(
+    "text",
+    x = 0.12, y = 0.05,
+    label = sprintf("AUC = %.4f", as.numeric(auc(roc_test)))
+  )
+
+print(g)
+# salvar
+ggsave("roc_curve_ada.png", plot = g, width = 4, height = 3)
+
+```
